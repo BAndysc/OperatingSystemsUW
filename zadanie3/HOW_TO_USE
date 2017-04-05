@@ -1,0 +1,21 @@
+# Dołączamy skrypt do /root/.profile
+cat profile_to_append.sh >> /root/.profile
+
+# kopiujemy bootloader do drugiego sektora
+## z zewnątrz:
+dd bs=512 count=1 if=minix.img of=minix.img seek=1 conv=notrunc
+
+## z poziomu minixa:
+dd bs=512 count=1 if=/dev/c0d0 of=/dev/c0d0 seek=1
+
+
+# kompilujemy bootloader
+nasm -f bin boot.asm -o boot.bin
+
+
+# kopiujemy nasz bootloader
+## z zewnątrz:
+dd bs=446 count=1 if=boot.bin of=minix.img conv=notrunc
+
+## z poziomu minixa:
+dd bs=446 count=1 if=boot.bin of=/dev/c0d0
