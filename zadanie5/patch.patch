@@ -1,0 +1,114 @@
+Binary files /usr/src/minix/servers/sched/main.o and nowy_minix/servers/sched/main.o differ
+Binary files /usr/src/minix/servers/sched/sched and nowy_minix/servers/sched/sched differ
+diff -rupN /usr/src/minix/servers/sched/schedproc.h nowy_minix/servers/sched/schedproc.h
+--- /usr/src/minix/servers/sched/schedproc.h	Tue May 23 01:06:48 2017
++++ nowy_minix/servers/sched/schedproc.h	Thu May 25 17:05:34 2017
+@@ -33,6 +33,9 @@ EXTERN struct schedproc {
+ 	bitchunk_t cpu_mask[BITMAP_CHUNKS(CONFIG_MAX_CPUS)]; /* what CPUs is the
+ 								process allowed
+ 								to run on */
++
++	time_t tokens;
++	clock_t last_given_tokens;
+ } schedproc[NR_PROCS];
+ 
+ /* Flag values */
+diff -rupN /usr/src/minix/servers/sched/schedule.c nowy_minix/servers/sched/schedule.c
+--- /usr/src/minix/servers/sched/schedule.c	Tue May 23 01:06:48 2017
++++ nowy_minix/servers/sched/schedule.c	Thu May 25 17:18:44 2017
+@@ -18,9 +18,14 @@ static minix_timer_t sched_timer;
+ static unsigned balance_timeout;
+ 
+ #define BALANCE_TIMEOUT	5 /* how often to balance queues in seconds */
++#define MAX_TOKENS 6
++#define SCHED_FACTOR 0.5
+ 
++int to_refill;
++clock_t last_refill;
+ static int schedule_process(struct schedproc * rmp, unsigned flags);
+ static void balance_queues(minix_timer_t *tp);
++static void give_tokens();
+ 
+ #define SCHEDULE_CHANGE_PRIO	0x1
+ #define SCHEDULE_CHANGE_QUANTUM	0x2
+@@ -103,6 +108,14 @@ int do_noquantum(message *m_ptr)
+ 		rmp->priority += 1; /* lower priority */
+ 	}
+ 
++	clock_t tm;
++	sys_times(rmp->endpoint, NULL, &tm, NULL, NULL);
++	int diff = (tm - rmp->last_given_tokens) ;
++	rmp->tokens -= diff;
++	rmp->last_given_tokens = tm;
++
++	give_tokens();
++
+ 	if ((rv = schedule_process_local(rmp)) != OK) {
+ 		return rv;
+ 	}
+@@ -168,6 +181,8 @@ int do_start_scheduling(message *m_ptr)
+ 		return EINVAL;
+ 	}
+ 
++	rmp->tokens = MAX_TOKENS;
++	sys_times(rmp->endpoint, NULL, &rmp->last_given_tokens, NULL, NULL);
+ 	/* Inherit current priority and time slice from parent. Since there
+ 	 * is currently only one scheduler scheduling the whole system, this
+ 	 * value is local and we assert that the parent endpoint is valid */
+@@ -319,6 +334,9 @@ static int schedule_process(struct schedproc * rmp, un
+ 	else
+ 		new_cpu = -1;
+ 
++	if (rmp->tokens <= 0)
++		return 0;
++
+ 	if ((err = sys_schedule(rmp->endpoint, new_prio,
+ 		new_quantum, new_cpu)) != OK) {
+ 		printf("PM: An error occurred when trying to schedule %d: %d\n",
+@@ -335,6 +353,9 @@ static int schedule_process(struct schedproc * rmp, un
+ 
+ void init_scheduling(void)
+ {
++	to_refill = 0;
++	sys_times(NONE, NULL, NULL, &last_refill, NULL);
++	
+ 	balance_timeout = BALANCE_TIMEOUT * sys_hz();
+ 	init_timer(&sched_timer);
+ 	set_timer(&sched_timer, balance_timeout, balance_queues, 0);
+@@ -353,6 +374,8 @@ static void balance_queues(minix_timer_t *tp)
+ {
+ 	struct schedproc *rmp;
+ 	int proc_nr;
++	
++	give_tokens();
+ 
+ 	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
+ 		if (rmp->flags & IN_USE) {
+@@ -364,4 +387,27 @@ static void balance_queues(minix_timer_t *tp)
+ 	}
+ 
+ 	set_timer(&sched_timer, balance_timeout, balance_queues, 0);
++}
++
++#define min(a, b) (a<b?a:b)
++
++static void give_tokens() {
++	int proc_nr;
++	clock_t t3;
++	sys_times(NONE, NULL, NULL, &t3, NULL);
++	int token_pool = (t3 - last_refill) * SCHED_FACTOR;
++	for(proc_nr = 0; proc_nr < NR_PROCS && token_pool > 0; proc_nr++) {
++		struct schedproc *proc = &schedproc[to_refill];
++		if ((proc->flags & IN_USE)  && proc->tokens < MAX_TOKENS) {
++			int new_val = min(MAX_TOKENS, proc->tokens + token_pool);
++			int to_give = new_val - proc->tokens;
++			token_pool -= to_give;
++			proc->tokens = new_val;
++			schedule_process_local(proc);
++		}
++		to_refill++;
++		if (to_refill == NR_PROCS)
++			to_refill = 0;
++	}
++	last_refill = t3;
+ }
